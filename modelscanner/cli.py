@@ -37,7 +37,7 @@ def run(cmd: list[str], label: str | None = None, ok_codes: tuple[int, ...] = (0
     if shutil.which(cmd[0]) is None:
         return {"tool": name, "available": False, "status": "unavailable", "reason": "not installed"}
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     except OSError as e:  # e.g. blocked by Windows Application Control
         return {"tool": name, "available": False, "status": "unavailable", "reason": f"could not run: {e}"}
     status = "clean" if p.returncode in ok_codes else "findings" if p.returncode in finding_codes else "error"
