@@ -2,6 +2,8 @@
 
 Usage:
     python -m modelscanner.cli PATH_OR_HF_REPO [--revision SHA] [--out report]
+    python -m modelscanner.cli ollama:NAME[:TAG]      # an installed Ollama model
+    python -m modelscanner.cli --list-ollama
 
 Exit code: 0 = no findings, 1 = findings, 2 = tool/usage error.
 A clean scan means "no known-bad pattern found", not "safe".
@@ -19,6 +21,8 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from . import gguf_check, ollama
 
 RISKY_EXT = {".pkl", ".pickle", ".pt", ".pth", ".bin", ".ckpt", ".h5", ".keras", ".joblib", ".npy", ".npz"}
 SAFE_EXT = {".safetensors", ".gguf", ".onnx"}
@@ -84,11 +88,10 @@ def source_scanners(root: Path) -> list[dict]:
 
 
 def gguf_scanners(root: Path) -> list[dict]:
-    """Metadata check for any .gguf files (pickle scanners don't cover GGUF)."""
-    from . import gguf_check
-
-    files = [root] if root.is_file() else sorted(root.rglob("*.gguf"))
-    files = [f for f in files if f.suffix.lower() == ".gguf"]
+    """Metadata check for any GGUF files (pickle scanners don't cover GGUF)."""
+    cands = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
+    # by extension, or by magic bytes for extensionless files (e.g. Ollama blobs)
+    files = [f for f in cands if f.suffix.lower() == ".gguf" or (not f.suffix and gguf_check.is_gguf(f))]
     if not files:
         return []
     results = [(f, gguf_check.check(f)) for f in files]
@@ -110,7 +113,7 @@ def inventory(root: Path) -> list[dict]:
     files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
     out = []
     for p in files:
-        ext = p.suffix.lower()
+        ext = ".gguf" if not p.suffix and gguf_check.is_gguf(p) else p.suffix.lower()
         out.append({
             "path": str(p.relative_to(root.parent if root.is_file() else root)),
             "bytes": p.stat().st_size,
@@ -126,8 +129,11 @@ def render_md(report: dict) -> str:
          f"- Scanned: {report['timestamp']}", f"- Verdict: **{report['verdict']}**", ""]
     L += ["## Summary", "", "| Scanner | Status | Detail |", "|---|---|---|"]
     ran = {s["tool"]: s for s in report["scanners"]}
-    absent = {"gguf-metadata": "no `.gguf` files in the target"}
-    for tool in ("modelscan", "picklescan", "bandit", "semgrep", "gguf-metadata"):
+    is_ollama = report.get("kind") == "ollama"
+    absent = {"gguf-metadata": "no GGUF files in the target"}
+    if is_ollama:
+        absent.update({t: "not applicable (Ollama models are GGUF)" for t in ("modelscan", "picklescan", "bandit", "semgrep")})
+    for tool in ("modelscan", "picklescan", "bandit", "semgrep", "gguf-metadata") + (("ollama-manifest",) if is_ollama else ()):
         s = ran.get(tool)
         if s is None:
             L.append(f"| {tool} | not run | {absent.get(tool, 'no `.py` files in the target')} |")
@@ -158,12 +164,46 @@ def render_md(report: dict) -> str:
     return "\n".join(L) + "\n"
 
 
+def main_ollama(a) -> int:
+    try:
+        model = ollama.load(a.target[len("ollama:"):])
+    except ollama.OllamaError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    files, scanners, notes = ollama.scan(model, sha256)
+    findings = any(s["status"] == "findings" for s in scanners)
+    degraded = [s["tool"] for s in scanners if s["status"] in ("error", "unavailable")]
+    report = {
+        "target": a.target, "revision": None, "kind": "ollama",
+        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "verdict": ("FINDINGS" if findings else "no known-bad patterns found")
+        + (f" (incomplete: {', '.join(degraded)} did not run cleanly)" if degraded else "")
+        + (" (nothing analyzed: no local model weights)" if notes and not findings else ""),
+        "notes": notes, "files": files, "scanners": scanners,
+    }
+    Path(f"{a.out}.json").write_text(json.dumps(report, indent=2))
+    Path(f"{a.out}.md").write_text(render_md(report), encoding="utf-8")
+    print(f"{report['verdict']} -> {a.out}.md / {a.out}.json")
+    return 1 if findings else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("target", help="local file/dir, or a Hugging Face repo id (org/name)")
+    ap.add_argument("target", nargs="?", help="local file/dir, a Hugging Face repo id (org/name), "
+                    "or an installed Ollama model as ollama:NAME[:TAG]")
+    ap.add_argument("--list-ollama", action="store_true", help="list installed Ollama models and exit")
     ap.add_argument("--revision", help="HF commit sha to pin (recommended)")
     ap.add_argument("--out", default="report", help="output basename (writes .json and .md)")
     a = ap.parse_args()
+
+    if a.list_ollama:
+        names = ollama.list_models()
+        print("\n".join(names) if names else f"no Ollama models found in {ollama.models_dir()}")
+        return 0
+    if not a.target:
+        ap.error("target required (or use --list-ollama)")
+    if a.target.startswith("ollama:"):
+        return main_ollama(a)
 
     tmp = None
     path = Path(a.target)

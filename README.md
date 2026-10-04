@@ -74,6 +74,24 @@ Exit codes: `0` clean, `1` findings, `2` no scanner could run. Use `--out name` 
 - CE analyzes one file at a time, so malicious code split across several files can be missed.
 - All scanners run in parallel.
 
+## Ollama models
+
+Scan a model you already pulled with Ollama, by name:
+
+```bash
+python -m modelscanner.cli --list-ollama                       # see what's installed
+python -m modelscanner.cli ollama:qwen3:8b --out report-qwen3  # NAME[:TAG], default tag is "latest"
+python -m modelscanner.cli "ollama:hf.co/org/repo:Q4_K_M"      # Hugging Face imports work too
+```
+
+Ollama keeps models as a manifest plus extensionless blobs in `~/.ollama/models` (override with `OLLAMA_MODELS`). `modelscanner` reads the manifest and, for each layer:
+
+- verifies the blob's sha256 matches the manifest digest (catches corruption or tampering; this hashes the whole file, so a 10 GB model takes ~30 s),
+- recognises GGUF by its magic bytes and runs the GGUF metadata check on the weights, so a model layer that is *not* GGUF is flagged,
+- shows the template, system prompt and parameters, and flags hidden Unicode in them (zero-width, bidi and "tag" characters used to smuggle instructions).
+
+The manifest is treated as untrusted: digests are validated and no path can leave the models folder. Cloud models (for example `…:cloud`) have no local weights, so the report says nothing was analyzed instead of calling them clean. It also works on a folder of blobs: extensionless GGUF files are detected by magic bytes.
+
 ## GGUF models
 
 GGUF has no pickle, so modelscan and picklescan don't apply. The `gguf-metadata` check reads only the header (memory-mapped; weights are never loaded and nothing is executed) and flags Jinja constructs in `tokenizer.chat_template` that are used in sandbox-escape payloads (dunder access, `lipsum`/`cycler` globals, `os`/`popen`/`eval`, hard-coded URLs) and tensors that extend past the end of the file. It does **not** detect parser bugs in a specific runtime or a backdoor in the weights, so keep your inference runtime (llama.cpp, Ollama, LM Studio) updated.

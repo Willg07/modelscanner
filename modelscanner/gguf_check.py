@@ -12,14 +12,31 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# Only text inside Jinja tags ({{ }} / {% %}) can execute; prose outside them is just text.
+TAG_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.S)
+STR_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
+
 # Constructs used in Jinja sandbox-escape / SSTI payloads. Legit chat templates don't use these.
-SUSPICIOUS = [
+# RAW patterns run on tag bodies as written (a dunder inside a string literal is still suspicious);
+# CODE patterns run with string literals blanked, so prose inside quotes can't trigger them.
+RAW_SUSPICIOUS = [
     (r"__\w+__", "dunder attribute access"),
     (r"\.\s*(mro|subclasses|globals|builtins)\b|\bgetattr\b|\|\s*attr\s*\(", "object-graph traversal"),
+    (r"https?://", "hard-coded URL in template code"),
+]
+CODE_SUSPICIOUS = [
     (r"\b(lipsum|cycler|joiner|config|request|self)\b\s*[.\[]", "Jinja global object access"),
     (r"\b(import|eval|exec|compile|open|popen|system|subprocess|os)\b\s*[.(]", "code/process execution keyword"),
-    (r"https?://", "hard-coded URL"),
 ]
+
+
+def is_gguf(path: Path) -> bool:
+    """GGUF files start with the magic bytes b'GGUF' (Ollama blobs have no extension)."""
+    try:
+        with path.open("rb") as f:
+            return f.read(4) == b"GGUF"
+    except OSError:
+        return False
 
 
 def _field_text(reader, key: str) -> str | None:
@@ -59,11 +76,14 @@ def check(path: Path) -> dict:
         lines.append("chat template: none")
     else:
         lines.append(f"chat template: {len(tmpl)} chars")
-        for pat, why in SUSPICIOUS:
-            m = re.search(pat, tmpl)
-            if m:
-                ctx = tmpl[max(0, m.start() - 40): m.end() + 40].replace("\n", " ")
-                findings.append(f"chat template: {why}: ...{ctx}...")
+        raw = "\n".join(TAG_RE.findall(tmpl))
+        code = STR_RE.sub("''", raw)
+        for text, pats in ((raw, RAW_SUSPICIOUS), (code, CODE_SUSPICIOUS)):
+            for pat, why in pats:
+                m = re.search(pat, text)
+                if m:
+                    ctx = text[max(0, m.start() - 40): m.end() + 40].replace("\n", " ")
+                    findings.append(f"chat template: {why}: ...{ctx}...")
 
     if findings:
         out.update(status="findings", exit_code=1,
