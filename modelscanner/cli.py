@@ -30,17 +30,36 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def run(cmd: list[str]) -> dict:
+def run(cmd: list[str], label: str | None = None, ok_codes: tuple[int, ...] = (0,), finding_codes: tuple[int, ...] = (1,)) -> dict:
+    """Run a scanner. status: clean | findings | error | unavailable."""
+    name = label or cmd[0]
     if shutil.which(cmd[0]) is None:
-        return {"tool": cmd[0], "available": False}
-    p = subprocess.run(cmd, capture_output=True, text=True)
+        return {"tool": name, "available": False, "status": "unavailable", "reason": "not installed"}
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:  # e.g. blocked by Windows Application Control
+        return {"tool": name, "available": False, "status": "unavailable", "reason": f"could not run: {e}"}
+    status = "clean" if p.returncode in ok_codes else "findings" if p.returncode in finding_codes else "error"
     return {
-        "tool": cmd[0],
+        "tool": name,
         "available": True,
+        "status": status,
         "exit_code": p.returncode,
         "stdout": p.stdout,
         "stderr": p.stderr,
     }
+
+
+def source_scanners(root: Path) -> list[dict]:
+    """Run bandit/semgrep on repo Python files (the trust_remote_code attack surface)."""
+    if not (root.is_file() and root.suffix == ".py") and not (root.is_dir() and any(root.rglob("*.py"))):
+        return []
+    return [
+        run([sys.executable, "-m", "bandit", "-r", str(root), "-q"], label="bandit"),
+        # --error: exit 1 on findings. Rules download from the semgrep registry (needs network).
+        run([sys.executable, "-m", "semgrep", "scan", "--config", "p/python", "--config", "p/security-audit",
+             "--error", "--quiet", str(root)], label="semgrep"),
+    ]
 
 
 def fetch_hf(repo: str, revision: str | None, dest: Path) -> Path:
@@ -74,9 +93,10 @@ def render_md(report: dict) -> str:
     for s in report["scanners"]:
         L += ["", f"## {s['tool']}", ""]
         if not s["available"]:
-            L.append("_Not installed — skipped._")
+            L.append(f"_Skipped — {s['reason']}._")
             continue
-        L += [f"Exit code: {s['exit_code']}", "", "```", (s["stdout"] + s["stderr"]).strip() or "(no output)", "```"]
+        L += [f"Status: **{s['status']}** (exit {s['exit_code']})", "", "```",
+              (s["stdout"] + s["stderr"]).strip() or "(no output)", "```"]
     L += ["", "> A clean scan means no *known-bad* pattern was found. It does not prove safety;",
           "> backdoors in weights are not detectable statically. Load untrusted pickle-format",
           "> models only in the sandbox (`sandbox/run_sandboxed.py`)."]
@@ -103,12 +123,15 @@ def main() -> int:
         if not any(s["available"] for s in scanners):
             print("Neither modelscan nor picklescan is installed (pip install -r requirements.txt).", file=sys.stderr)
             return 2
-        findings = any(s["available"] and s["exit_code"] != 0 for s in scanners)
+        scanners += source_scanners(path)
+        findings = any(s["status"] == "findings" for s in scanners)
+        degraded = [s["tool"] for s in scanners if s["status"] in ("error", "unavailable")]
         files = inventory(path)
         report = {
             "target": a.target, "revision": a.revision,
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-            "verdict": "FINDINGS" if findings else "no known-bad patterns found",
+            "verdict": ("FINDINGS" if findings else "no known-bad patterns found")
+            + (f" (incomplete: {', '.join(degraded)} did not run cleanly)" if degraded else ""),
             "files": files, "scanners": scanners,
         }
         Path(f"{a.out}.json").write_text(json.dumps(report, indent=2))
