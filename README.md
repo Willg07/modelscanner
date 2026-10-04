@@ -22,9 +22,18 @@ Exit codes: `0` clean, `1` findings (or suspicious behavior), `2` tool/usage err
 
 ## Source scanners (bandit, semgrep)
 
-Invoked as `python -m bandit` / `python -m semgrep`, so they don't depend on PATH launcher shims. A scanner that can't run is reported as *skipped* or *error* and the verdict is marked incomplete, never silently clean.
+- **bandit** runs natively (`python -m bandit`).
+- **semgrep CE** runs in Docker (`semgrep/semgrep`, folder mounted read-only), using the local rules in `rules/model_repo.yml` (offline) plus the registry rulesets `p/python` and `p/security-audit` (these need network). Docker Desktop must be running; the first run pulls the image.
+- All scanners run in parallel. A scanner that can't run is reported as *skipped* or *error* and the verdict is marked incomplete, never silently clean.
+- CE analyzes one file at a time (no cross-file dataflow), so code split across several files can be missed.
 
-- **semgrep** is not natively supported on Windows (and its binaries may be blocked by Application Control). Run it under WSL or Docker/Linux. Its rulesets download from the semgrep registry, so it needs network access.
+## Recommended workflow
+
+```bash
+hf download org/model --revision <sha> --local-dir ./models/model   # download once
+python -m modelscanner.cli ./models/model --out report-model        # scan the folder
+python sandbox/run_sandboxed.py ./models/model --trace              # only for pickle-format weights
+```
 
 ## Limits
 

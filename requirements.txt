@@ -3,4 +3,3 @@ picklescan
 fickling
 huggingface_hub
 bandit
-semgrep

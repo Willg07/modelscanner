@@ -1,0 +1,46 @@
+rules:
+  - id: model-exec-decoded
+    languages: [python]
+    severity: ERROR
+    message: exec/eval on decoded or fetched data in a model repo (classic payload loader).
+    pattern-either:
+      - pattern: exec(base64.b64decode(...))
+      - pattern: eval(base64.b64decode(...))
+      - pattern: exec(codecs.decode(...))
+      - pattern: exec(requests.get(...).text)
+      - pattern: exec(urllib.request.urlopen(...).read())
+  - id: model-shell-exec
+    languages: [python]
+    severity: ERROR
+    message: Shell/command execution in model code. Legitimate modeling code almost never needs this.
+    pattern-either:
+      - pattern: os.system(...)
+      - pattern: subprocess.$F(..., shell=True, ...)
+      - pattern: os.popen(...)
+  - id: model-network-call
+    languages: [python]
+    severity: WARNING
+    message: Network call in model code. Review where the data goes.
+    pattern-either:
+      - pattern: requests.$M(...)
+      - pattern: urllib.request.urlopen(...)
+      - pattern: socket.socket(...)
+      - pattern: httpx.$M(...)
+  - id: model-unsafe-deserialize
+    languages: [python]
+    severity: ERROR
+    message: Unsafe deserialization inside model code.
+    pattern-either:
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+      - pattern: torch.load(..., weights_only=False, ...)
+      - pattern: marshal.loads(...)
+      - pattern: yaml.load(...)
+  - id: model-secret-harvest
+    languages: [python]
+    severity: WARNING
+    message: Reads environment variables or credential files; check it is not exfiltrating them.
+    pattern-either:
+      - pattern: os.environ
+      - pattern: open("~/.ssh/...")
+      - pattern: os.path.expanduser("~/.aws/...")

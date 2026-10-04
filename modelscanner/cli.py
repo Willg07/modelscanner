@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 RISKY_EXT = {".pkl", ".pickle", ".pt", ".pth", ".bin", ".ckpt", ".h5", ".keras", ".joblib", ".npy", ".npz"}
@@ -50,16 +51,32 @@ def run(cmd: list[str], label: str | None = None, ok_codes: tuple[int, ...] = (0
     }
 
 
+RULES_DIR = Path(__file__).resolve().parent.parent / "rules"
+
+
+def semgrep_docker(root: Path) -> dict:
+    """semgrep (CE) in Docker: read-only mount, local rules + registry rules."""
+    if shutil.which("docker") is None:
+        return {"tool": "semgrep", "available": False, "status": "unavailable", "reason": "docker not installed"}
+    if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+        return {"tool": "semgrep", "available": False, "status": "unavailable",
+                "reason": "docker daemon not running (start Docker Desktop)"}
+    src = root if root.is_dir() else root.parent
+    cmd = ["docker", "run", "--rm", "-v", f"{src}:/src:ro", "-v", f"{RULES_DIR}:/rules:ro",
+           "semgrep/semgrep", "semgrep", "scan", "--config", "/rules",
+           "--config", "p/python", "--config", "p/security-audit",  # registry rules need network
+           "--error", "--quiet", "--metrics=off", "/src"]
+    return run(cmd, label="semgrep")
+
+
 def source_scanners(root: Path) -> list[dict]:
-    """Run bandit/semgrep on repo Python files (the trust_remote_code attack surface)."""
+    """bandit (native) + semgrep (Docker) on repo Python files, run in parallel."""
     if not (root.is_file() and root.suffix == ".py") and not (root.is_dir() and any(root.rglob("*.py"))):
         return []
-    return [
-        run([sys.executable, "-m", "bandit", "-r", str(root), "-q"], label="bandit"),
-        # --error: exit 1 on findings. Rules download from the semgrep registry (needs network).
-        run([sys.executable, "-m", "semgrep", "scan", "--config", "p/python", "--config", "p/security-audit",
-             "--error", "--quiet", str(root)], label="semgrep"),
-    ]
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        b = ex.submit(run, [sys.executable, "-m", "bandit", "-r", str(root), "-q"], "bandit")
+        s = ex.submit(semgrep_docker, root)
+        return [b.result(), s.result()]
 
 
 def fetch_hf(repo: str, revision: str | None, dest: Path) -> Path:
@@ -116,10 +133,10 @@ def main() -> int:
         if not path.exists():
             tmp = Path(tempfile.mkdtemp(prefix="modelscanner-"))
             path = fetch_hf(a.target, a.revision, tmp)
-        scanners = [
-            run(["modelscan", "-p", str(path)]),
-            run(["picklescan", "--path", str(path)]),
-        ]
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(run, ["modelscan", "-p", str(path)]),
+                  ex.submit(run, ["picklescan", "--path", str(path)])]
+            scanners = [f.result() for f in fs]
         if not any(s["available"] for s in scanners):
             print("Neither modelscan nor picklescan is installed (pip install -r requirements.txt).", file=sys.stderr)
             return 2
