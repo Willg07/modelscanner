@@ -8,6 +8,7 @@ Downloading a model doesn't run anything. **Loading** it can: pickle-based forma
 |---|---|---|
 | **1. Static scan** | modelscan, picklescan | Looks inside model files for dangerous pickle operations |
 | | bandit, semgrep CE | Scans the repo's `.py` files (the `trust_remote_code` surface) |
+| | gguf-metadata | For `.gguf` files (not a pickle format): checks the chat template for sandbox-escape constructs and tensor extents for truncation |
 | **2. Dynamic load** *(optional)* | Docker | Loads pickle-format weights in a locked-down container (no network, read-only, non-root) |
 
 Everything writes one report: `report.md` (readable) and `report.json` (machine-readable).
@@ -60,6 +61,7 @@ python sandbox/run_sandboxed.py ./models/model-name --trace
 | semgrep | SKIPPED | docker daemon not running |
 
 - **CLEAN**: no known-bad pattern found.
+- **UNSUPPORTED**: the tool doesn't read this file format (for example modelscan on a `.gguf`). The report notes when the pickle scanners had nothing to analyze, so a model isn't presented as "scanned" when no scanner actually read it.
 - **FINDINGS**: read that scanner's section further down. Don't load the model until you understand it.
 - **SKIPPED / ERROR**: the scanner didn't finish, so the verdict says `(incomplete: …)`. Fix the cause (usually Docker isn't running) and re-run. An incomplete result is never reported as clean.
 
@@ -71,6 +73,10 @@ Exit codes: `0` clean, `1` findings, `2` no scanner could run. Use `--out name` 
 - **semgrep CE** runs in Docker with your folder mounted read-only, using the local rules in `rules/model_repo.yml` (offline) plus the registry rulesets `p/python` and `p/security-audit` (these need network).
 - CE analyzes one file at a time, so malicious code split across several files can be missed.
 - All scanners run in parallel.
+
+## GGUF models
+
+GGUF has no pickle, so modelscan and picklescan don't apply. The `gguf-metadata` check reads only the header (memory-mapped; weights are never loaded and nothing is executed) and flags Jinja constructs in `tokenizer.chat_template` that are used in sandbox-escape payloads (dunder access, `lipsum`/`cycler` globals, `os`/`popen`/`eval`, hard-coded URLs) and tensors that extend past the end of the file. It does **not** detect parser bugs in a specific runtime or a backdoor in the weights, so keep your inference runtime (llama.cpp, Ollama, LM Studio) updated.
 
 ## Tests
 

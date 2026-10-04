@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -31,16 +32,19 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def run(cmd: list[str], label: str | None = None, ok_codes: tuple[int, ...] = (0,), finding_codes: tuple[int, ...] = (1,)) -> dict:
-    """Run a scanner. status: clean | findings | error | unavailable."""
+def run(cmd: list[str], label: str | None = None, ok_codes: tuple[int, ...] = (0,), finding_codes: tuple[int, ...] = (1,),
+        unsupported_codes: tuple[int, ...] = ()) -> dict:
+    """Run a scanner. status: clean | findings | unsupported | error | unavailable."""
     name = label or cmd[0]
     if shutil.which(cmd[0]) is None:
         return {"tool": name, "available": False, "status": "unavailable", "reason": "not installed"}
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
     except OSError as e:  # e.g. blocked by Windows Application Control
         return {"tool": name, "available": False, "status": "unavailable", "reason": f"could not run: {e}"}
-    status = "clean" if p.returncode in ok_codes else "findings" if p.returncode in finding_codes else "error"
+    status = ("clean" if p.returncode in ok_codes else "findings" if p.returncode in finding_codes
+              else "unsupported" if p.returncode in unsupported_codes else "error")
     return {
         "tool": name,
         "available": True,
@@ -79,6 +83,23 @@ def source_scanners(root: Path) -> list[dict]:
         return [b.result(), s.result()]
 
 
+def gguf_scanners(root: Path) -> list[dict]:
+    """Metadata check for any .gguf files (pickle scanners don't cover GGUF)."""
+    from . import gguf_check
+
+    files = [root] if root.is_file() else sorted(root.rglob("*.gguf"))
+    files = [f for f in files if f.suffix.lower() == ".gguf"]
+    if not files:
+        return []
+    results = [(f, gguf_check.check(f)) for f in files]
+    if len(results) == 1:
+        return [results[0][1]]
+    rank = {"findings": 3, "error": 2, "unavailable": 1, "clean": 0}
+    worst = max((r for _, r in results), key=lambda r: rank[r["status"]])
+    body = "\n\n".join(f"== {f.name}\n{r.get('stdout') or r.get('reason', '')}" for f, r in results)
+    return [{**worst, "tool": "gguf-metadata", "stdout": body, "available": worst["available"]}]
+
+
 def fetch_hf(repo: str, revision: str | None, dest: Path) -> Path:
     from huggingface_hub import snapshot_download  # lazy: only needed for repos
 
@@ -105,16 +126,21 @@ def render_md(report: dict) -> str:
          f"- Scanned: {report['timestamp']}", f"- Verdict: **{report['verdict']}**", ""]
     L += ["## Summary", "", "| Scanner | Status | Detail |", "|---|---|---|"]
     ran = {s["tool"]: s for s in report["scanners"]}
-    for tool in ("modelscan", "picklescan", "bandit", "semgrep"):
+    absent = {"gguf-metadata": "no `.gguf` files in the target"}
+    for tool in ("modelscan", "picklescan", "bandit", "semgrep", "gguf-metadata"):
         s = ran.get(tool)
         if s is None:
-            L.append(f"| {tool} | not run | no `.py` files in the target |")
+            L.append(f"| {tool} | not run | {absent.get(tool, 'no `.py` files in the target')} |")
         elif not s["available"]:
             L.append(f"| {tool} | SKIPPED | {s['reason']} |")
+        elif s["status"] == "unsupported":
+            L.append(f"| {tool} | UNSUPPORTED | no files in a format this tool supports (exit {s['exit_code']}) |")
         else:
             L.append(f"| {tool} | {s['status'].upper()} | exit code {s['exit_code']} |")
+    for n in report.get("notes", []):
+        L.append(f"\n> Note: {n}.")
     L += ["", "Status meanings: **CLEAN** = no known-bad pattern; **FINDINGS** = review the section below;",
-          "**ERROR/SKIPPED** = the scanner did not complete, so the result is incomplete.", ""]
+          "**UNSUPPORTED** = the tool does not read this file format; **ERROR/SKIPPED** = the scanner did not complete, so the result is incomplete.", ""]
     L += ["## Files", "", "| File | Bytes | Format risk | sha256 |", "|---|---|---|---|"]
     for f in report["files"]:
         flag = " (remote code)" if f["remote_code"] else ""
@@ -146,21 +172,27 @@ def main() -> int:
             tmp = Path(tempfile.mkdtemp(prefix="modelscanner-"))
             path = fetch_hf(a.target, a.revision, tmp)
         with ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(run, ["modelscan", "-p", str(path)]),
+            fs = [ex.submit(run, ["modelscan", "-p", str(path)], unsupported_codes=(3,)),  # 3 = no supported files
                   ex.submit(run, ["picklescan", "--path", str(path)])]
             scanners = [f.result() for f in fs]
         if not any(s["available"] for s in scanners):
             print("Neither modelscan nor picklescan is installed (pip install -r requirements.txt).", file=sys.stderr)
             return 2
-        scanners += source_scanners(path)
+        scanners += source_scanners(path) + gguf_scanners(path)
         findings = any(s["status"] == "findings" for s in scanners)
         degraded = [s["tool"] for s in scanners if s["status"] in ("error", "unavailable")]
         files = inventory(path)
+        pickle_files = any(f["format_risk"] == "pickle-capable" for f in files)
+        notes = []
+        if not pickle_files:
+            notes.append("modelscan/picklescan had nothing to analyze: no pickle-capable files")
+        degraded = [t for t in degraded]
         report = {
             "target": a.target, "revision": a.revision,
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "verdict": ("FINDINGS" if findings else "no known-bad patterns found")
             + (f" (incomplete: {', '.join(degraded)} did not run cleanly)" if degraded else ""),
+            "notes": notes,
             "files": files, "scanners": scanners,
         }
         Path(f"{a.out}.json").write_text(json.dumps(report, indent=2))
