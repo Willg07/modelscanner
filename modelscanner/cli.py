@@ -110,7 +110,9 @@ def fetch_hf(repo: str, revision: str | None, dest: Path) -> Path:
 
 
 def inventory(root: Path) -> list[dict]:
-    files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
+    # skip the Hugging Face client's own bookkeeping (<dir>/.cache/huggingface/...), which is not model content
+    files = [root] if root.is_file() else sorted(
+        p for p in root.rglob("*") if p.is_file() and ".cache" not in p.relative_to(root).parts)
     out = []
     for p in files:
         ext = ".gguf" if not p.suffix and gguf_check.is_gguf(p) else p.suffix.lower()

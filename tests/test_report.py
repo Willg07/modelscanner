@@ -36,5 +36,20 @@ class SummaryTableTests(unittest.TestCase):
         self.assertLess(md.index("## Summary"), md.index("## Files"))
 
 
+class InventoryTests(unittest.TestCase):
+    def test_hf_cache_bookkeeping_is_excluded(self):
+        import tempfile
+        from pathlib import Path
+
+        from modelscanner.cli import inventory
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "model.bin").write_bytes(b"x")
+            (root / ".cache" / "huggingface" / "download").mkdir(parents=True)
+            (root / ".cache" / "huggingface" / "download" / "model.bin.metadata").write_text("m")
+            paths = [f["path"] for f in inventory(root)]
+        self.assertEqual(paths, ["model.bin"])
+
 if __name__ == "__main__":
     unittest.main()
