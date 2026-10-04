@@ -103,6 +103,18 @@ def inventory(root: Path) -> list[dict]:
 def render_md(report: dict) -> str:
     L = [f"# Model scan report", "", f"- Target: `{report['target']}`", f"- Revision: `{report['revision'] or 'n/a'}`",
          f"- Scanned: {report['timestamp']}", f"- Verdict: **{report['verdict']}**", ""]
+    L += ["## Summary", "", "| Scanner | Status | Detail |", "|---|---|---|"]
+    ran = {s["tool"]: s for s in report["scanners"]}
+    for tool in ("modelscan", "picklescan", "bandit", "semgrep"):
+        s = ran.get(tool)
+        if s is None:
+            L.append(f"| {tool} | not run | no `.py` files in the target |")
+        elif not s["available"]:
+            L.append(f"| {tool} | SKIPPED | {s['reason']} |")
+        else:
+            L.append(f"| {tool} | {s['status'].upper()} | exit code {s['exit_code']} |")
+    L += ["", "Status meanings: **CLEAN** = no known-bad pattern; **FINDINGS** = review the section below;",
+          "**ERROR/SKIPPED** = the scanner did not complete, so the result is incomplete.", ""]
     L += ["## Files", "", "| File | Bytes | Format risk | sha256 |", "|---|---|---|---|"]
     for f in report["files"]:
         flag = " (remote code)" if f["remote_code"] else ""
