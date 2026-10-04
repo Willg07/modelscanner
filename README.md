@@ -41,7 +41,26 @@ hf download org/model-name --revision <commit-sha> --local-dir ./models/model-na
 python -m modelscanner.cli ./models/model-name --out report-model-name
 ```
 
-Find the commit sha on the model's **Files and versions** page. Pinning it means the repo can't change between your scan and your use.
+### What is `--revision`? (optional)
+
+Every Hugging Face model repo is a git repo, and each save of it has a **commit sha**: a long ID such as `a1b2c3d4e5f6…`. `--revision` tells `modelscanner` to download that exact version. If you leave it out, you get the latest version (the `main` branch).
+
+Why pin it: the repo owner can change files on `main` at any time, including swapping in a malicious file after you scanned it. If you scan `main` today and load `main` next week, you may be loading something different from what you scanned. Pinning means the scan and your later load use the same bytes.
+
+```bash
+# Without --revision: scans whatever main is right now
+python -m modelscanner.cli org/model-name
+
+# With --revision: scans exactly that version
+python -m modelscanner.cli org/model-name --revision a1b2c3d4e5f6
+
+# Then load the SAME version you scanned (in Python)
+#   AutoModel.from_pretrained("org/model-name", revision="a1b2c3d4e5f6")
+```
+
+To find the sha: open the model page, click **Files and versions**, then **History** (or the latest commit link at the top of the file list). The short code next to a commit is its sha. You can paste the short or the full one.
+
+Use `--revision` whenever you plan to run the model afterward; skip it for a quick look. It applies to Hugging Face downloads only. Local files and `ollama:` models are already on disk, so it isn't needed (for Ollama, the manifest digests serve the same purpose).
 
 Only if the model has pickle-format weights *and* you need to confirm what loading does:
 
