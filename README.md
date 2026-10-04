@@ -16,7 +16,7 @@ Everything writes one report: `report.md` (readable) and `report.json` (machine-
 ## Prerequisites
 
 - **Python 3.12 or older.** `modelscan` doesn't install on 3.13/3.14. [`uv`](https://docs.astral.sh/uv/) makes this easy.
-- **Docker Desktop**, running, for semgrep and the sandbox. Without it, those parts are skipped and the report says it's incomplete.
+- **Docker Desktop** (optional, recommended), running. The normal scan **never loads the model**; Docker is used only for semgrep on `.py` files and for the optional sandbox. Without it, semgrep is skipped and the report says it's incomplete. See [Docker: what it's used for](#docker-what-its-used-for).
 - Network access for the first run: Docker pulls the semgrep image, and semgrep downloads its rulesets.
 
 ## Quick start
@@ -64,11 +64,7 @@ To find the sha: open the model page, click **Files and versions**, then **Histo
 
 Use `--revision` whenever you plan to run the model afterward; skip it for a quick look. It applies to Hugging Face downloads only. Local files and `ollama:` models are already on disk, so it isn't needed (for Ollama, the manifest digests serve the same purpose).
 
-Only if the model has pickle-format weights *and* you need to confirm what loading does:
-
-```bash
-python sandbox/run_sandboxed.py ./models/model-name --trace
-```
+Optional: if the model has pickle-format weights and you want to see what loading it does, use the [Docker sandbox](#optional-the-docker-sandbox-loads-the-model).
 
 ## Reading the report
 
@@ -94,6 +90,47 @@ Exit codes: `0` clean, `1` findings, `2` no scanner could run. Use `--out name` 
 - **semgrep CE** runs in Docker with your folder mounted read-only, using the local rules in `rules/model_repo.yml` (offline) plus the registry rulesets `p/python` and `p/security-audit` (these need network).
 - CE analyzes one file at a time, so malicious code split across several files can be missed.
 - All scanners run in parallel.
+
+## Docker: what it's used for
+
+Start Docker Desktop and wait for "Engine running" before using either of these.
+
+| You run | Needs Docker? | Is the model loaded? |
+|---|---|---|
+| `python -m modelscanner.cli …` (the normal scan) | Only for semgrep, and only if the target has `.py` files | **No.** Files are read and parsed, never executed |
+| `python sandbox/run_sandboxed.py …` (optional) | Yes | **Yes**, inside a locked-down container |
+
+So starting Docker and running the normal scan does **not** load the model into Docker. It only lets semgrep scan the repo's Python source.
+
+### Optional: the Docker sandbox (loads the model)
+
+Run the static scan first. Then, only if the model has pickle-format weights and you want to see what loading it actually does:
+
+```bash
+python sandbox/run_sandboxed.py ./models/model-name            # load it in the container
+python sandbox/run_sandboxed.py ./models/model-name --trace    # also watch network/process syscalls
+python sandbox/run_sandboxed.py ./models/model-name --timeout 300   # default timeout is 120 s
+```
+
+- **What it loads:** every `.pt`, `.pth`, `.bin`, `.ckpt`, `.pkl` and `.pickle` file in the folder, using `torch.load(..., weights_only=False)`. That is deliberately the dangerous path, so any hidden code actually runs, inside the container. It skips `.safetensors` and GGUF (neither can execute code on load) and does not load `.h5` files.
+- **Containment:** no network, read-only filesystem, your model folder mounted read-only, all Linux capabilities dropped, non-root user, and memory/CPU/process limits. (`--trace` is the one exception: `strace` needs it, so that run is root inside the container with one extra capability, `SYS_PTRACE`, but still no network and a read-only filesystem.) The first run builds the image (`modelscanner-sandbox`), which downloads PyTorch and takes a few minutes. Remove it later with `docker image rm modelscanner-sandbox`.
+- **Output and exit code:** one line per file (`LOADED` or `FAILED`). The command exits `0` if everything loaded, `1` if any file failed or the run timed out. With `--trace`, it also prints how many suspicious `connect`/`execve` syscalls it saw, and exits `1` if there were any.
+
+Example for a benign model:
+
+```
+LOADED  /model/pytorch_model.bin
+--- 0 suspicious connect/execve syscalls ---
+container exit code: 0
+```
+
+How to read it:
+- **LOADED with 0 suspicious syscalls** is reassuring, not proof of safety. Code can stay dormant or behave differently when it detects a sandbox.
+- **Suspicious syscalls, or unexpected output from the model** (messages it printed, network attempts): treat the model as malicious and don't load it on your machine.
+- **FAILED** can be harmless (the file isn't torch-format) or a payload that crashed. Check the message, and compare with the static scan.
+- A timeout is treated as suspicious.
+
+Docker shares your machine's kernel, so this is strong containment but not a perfect boundary (see [Limits](#limits-please-read)). For high-risk samples, use a disposable VM. Only load models you are authorized to handle.
 
 ## Ollama models
 
