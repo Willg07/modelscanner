@@ -35,6 +35,14 @@ python -m modelscanner.cli ./models/model --out report-model        # scan the f
 python sandbox/run_sandboxed.py ./models/model --trace              # only for pickle-format weights
 ```
 
+## Tests
+
+```bash
+python -m unittest discover -s tests -v     # venv active; Docker tests skip if the daemon is down
+```
+
+`tests/test_sandbox_containment.py` builds a malicious Linux pickle at test time (`posix.system`, never committed), loads it in the sandbox, and asserts the payload **did execute** (so the test isn't vacuous) but ran as uid 10001 with no capabilities, could not write the read-only model folder, and could not open a network connection. Static tests also guard the `docker run` flags (`--network=none`, `--read-only`, `--cap-drop=ALL`, read-only mount, no `--privileged`/docker.sock). Run these after any change to `sandbox/`.
+
 ## Limits
 
 A clean result means *no known-bad pattern found*, not *safe*. Scanners are blocklist-based and have been bypassed; backdoors in weights are invisible to static analysis. Prefer `.safetensors`, `torch.load(weights_only=True)`, no `trust_remote_code`, and pin revisions. For high-risk samples use a disposable VM (or gVisor: `--runtime=runsc`) instead of plain Docker.

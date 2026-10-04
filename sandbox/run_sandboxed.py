@@ -27,6 +27,22 @@ def sh(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, text=True, **kw)
 
 
+def build_cmd(model: Path, trace: bool = False) -> list[str]:
+    """The docker run command. Containment flags live here; tests assert them."""
+    cmd = [
+        "docker", "run", "--rm",
+        "--network=none", "--read-only", "--tmpfs", "/tmp:rw,size=256m,noexec",
+        "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--memory=4g", "--cpus=2", "--pids-limit=128",
+        "--user", "10001:10001",
+        "-v", f"{model}:/model:ro",
+        "-e", f"TRACE={'1' if trace else '0'}",
+    ]
+    if trace:
+        cmd += ["--cap-add=SYS_PTRACE", "--user", "0:0"]  # strace needs ptrace; still no network
+    return cmd + [IMAGE]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("model_dir")
@@ -42,18 +58,7 @@ def main() -> int:
     if sh(["docker", "build", "-q", "-t", IMAGE, str(HERE)]).returncode != 0:
         return 2
 
-    cmd = [
-        "docker", "run", "--rm",
-        "--network=none", "--read-only", "--tmpfs", "/tmp:rw,size=256m,noexec",
-        "--cap-drop=ALL", "--security-opt=no-new-privileges",
-        "--memory=4g", "--cpus=2", "--pids-limit=128",
-        "--user", "10001:10001",
-        "-v", f"{model}:/model:ro",
-        "-e", f"TRACE={'1' if a.trace else '0'}",
-    ]
-    if a.trace:
-        cmd += ["--cap-add=SYS_PTRACE", "--user", "0:0"]  # strace needs ptrace; still no network
-    cmd += [IMAGE]
+    cmd = build_cmd(model, a.trace)
 
     try:
         p = sh(cmd, timeout=a.timeout)
