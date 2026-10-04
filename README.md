@@ -34,12 +34,14 @@ Scan a model. Pick **one**:
 
 ```bash
 # A. Let the tool download, scan, and clean up (simplest)
-python -m modelscanner.cli org/model-name --revision <commit-sha>
+python -m modelscanner.cli org/model-name
 
 # B. Download once, scan the folder (better for large models; you keep the files)
-hf download org/model-name --revision <commit-sha> --local-dir ./models/model-name
+hf download org/model-name --local-dir ./models/model-name
 python -m modelscanner.cli ./models/model-name --out report-model-name
 ```
+
+`--revision` is optional. Add `--revision <commit-sha>` to either command (the `hf download` line in B, or the `modelscanner` line in A) to scan one exact version instead of the latest. Recommended if you plan to run the model afterward; see below.
 
 ### What is `--revision`? (optional)
 
